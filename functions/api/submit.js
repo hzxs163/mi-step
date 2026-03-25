@@ -1,155 +1,174 @@
 /**
- * Cloudflare Pages Functions - 小米运动步数修改接口
- * 完整异常捕获 + 标准化 JSON 响应 + 参数校验
+ * 小米运动步数修改 - Cloudflare Pages Functions 完整版
+ * 包含：AES加密、登录、步数提交、完整异常处理
  */
 export async function onRequestPost(context) {
-  // 初始化日志
-  const log = [];
-  log.push(`[${new Date().toLocaleString()}] 接口请求开始`);
+    // 初始化日志
+    const log = [`[${new Date().toLocaleString()}] 开始处理请求`];
 
-  try {
-    // 1. 跨域头配置（必须）
-    const headers = {
-      "Content-Type": "application/json; charset=utf-8",
-      "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "POST, OPTIONS",
-      "Access-Control-Allow-Headers": "Content-Type"
-    };
+    try {
+        // 1. 跨域和响应头配置
+        const headers = {
+            "Content-Type": "application/json; charset=utf-8",
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "POST, OPTIONS",
+            "Access-Control-Allow-Headers": "Content-Type"
+        };
 
-    // 2. 处理 OPTIONS 预检请求
-    if (context.request.method === "OPTIONS") {
-      return new Response(JSON.stringify({ status: "success", message: "预检成功" }), { headers });
+        // 处理OPTIONS预检请求
+        if (context.request.method === "OPTIONS") {
+            return new Response(JSON.stringify({
+                status: "success",
+                message: "预检请求成功"
+            }), { headers });
+        }
+
+        // 2. 获取并验证表单参数
+        const formData = await context.request.formData();
+        const account = formData.get("account")?.trim();
+        const password = formData.get("password")?.trim();
+        const step = formData.get("step")?.trim();
+
+        log.push(`获取参数：账号=${account}, 步数=${step}`);
+
+        // 基础校验
+        if (!account || !/^1[3-9]\d{9}$/.test(account)) {
+            throw new Error("请输入有效的小米手机号账号");
+        }
+        if (!password) {
+            throw new Error("小米密码不能为空");
+        }
+        if (!step || isNaN(step) || Number(step) < 10 || Number(step) > 39999) {
+            throw new Error("步数必须是10-39999之间的有效数字");
+        }
+        const targetStep = Number(step);
+
+        // 3. AES-CBC加密（小米密码加密规则）
+        log.push("开始加密密码");
+        const aesKey = "xeNtBVqzDc6tuNTh"; // 小米固定加密密钥（可替换为自己的）
+        const aesIv = "MAAAYAAAAAAAAABg";  // 小米固定加密向量
+        const encryptedPwd = await aesCbcEncrypt(password, aesKey, aesIv);
+        log.push("密码加密完成");
+
+        // 4. 小米账号登录获取token
+        log.push("开始登录小米账号");
+        const loginUrl = `https://api-user.huami.com/registrations/+86${account}/tokens`;
+        const loginRes = await fetch(loginUrl, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                client_id: "HuaMi",
+                password: encryptedPwd,
+                country_code: "CN",
+                login_token: "",
+                code: "",
+                redirect_uri: "",
+                token: "access"
+            }),
+            timeout: 10000
+        });
+
+        if (!loginRes.ok) {
+            throw new Error(`登录失败 [${loginRes.status}]：可能是账号密码错误`);
+        }
+
+        const loginData = await loginRes.json();
+        const accessToken = loginData.token_info?.access_token;
+        if (!accessToken) {
+            throw new Error("登录成功，但未获取到访问令牌（access_token）");
+        }
+        log.push("登录成功，获取到access_token");
+
+        // 5. 提交步数到小米服务器
+        log.push(`开始提交步数：${targetStep}步`);
+        const now = Date.now();
+        const submitUrl = "https://api-mifit-cn.huami.com/v1/data/band_data.json";
+        const submitRes = await fetch(submitUrl, {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                "x-xiaomi-protocal-flag-cli": "PROTOCAL-HTTP2",
+                "authorization": `Bearer ${accessToken}`
+            },
+            body: JSON.stringify({
+                "userid": account,
+                "last_deviceid": "MI_BAND_8", // 设备ID，可替换为自己的
+                "device_id": "android_phone_123456",
+                "data_json": `[{"sport_type":0,"start_time":${now - 86400000},"end_time":${now},"data":[{"time":${now - 3600000},"value":${targetStep}}]}]`,
+                "upload_time": now,
+                "device_type": "android_phone",
+                "band_type": "smartband",
+                "app_version": "6.6.0",
+                "os_version": "13",
+                "device_model": "MIUI",
+                "sync_type": "realtime"
+            }),
+            timeout: 10000
+        });
+
+        if (!submitRes.ok) {
+            throw new Error(`步数提交失败 [${submitRes.status}]：小米服务器拒绝请求`);
+        }
+
+        const submitData = await submitRes.json();
+        log.push(`步数提交成功，响应：${JSON.stringify(submitData)}`);
+
+        // 6. 返回成功响应
+        return new Response(JSON.stringify({
+            status: "success",
+            message: `步数修改成功！已为账号 ${account} 提交 ${targetStep} 步`,
+            log: log.join("\n"),
+            time: new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })
+        }), { headers });
+
+    } catch (error) {
+        // 7. 全局异常捕获（确保始终返回JSON）
+        log.push(`处理失败：${error.message}`);
+        console.error("接口异常详情：", error);
+
+        return new Response(JSON.stringify({
+            status: "failed",
+            message: error.message || "服务器内部错误",
+            log: log.join("\n"),
+            time: new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })
+        }), {
+            status: 500,
+            headers: {
+                "Content-Type": "application/json; charset=utf-8",
+                "Access-Control-Allow-Origin": "*"
+            }
+        });
     }
+}
 
-    // 3. 获取并校验表单参数
-    const formData = await context.request.formData();
-    const user = formData.get("account")?.trim();
-    const pwd = formData.get("password")?.trim();
-    const step = formData.get("step")?.trim();
-
-    log.push(`获取参数：账号=${user}, 步数=${step}`);
-
-    // 基础参数校验
-    if (!user || !pwd) {
-      throw new Error("账号/密码不能为空");
-    }
-    if (!step || isNaN(step) || Number(step) < 10 || Number(step) > 39999) {
-      throw new Error("步数必须是10-39999之间的数字");
-    }
-    const stepNum = Number(step);
-
-    // 4. 配置项（可替换为 Cloudflare 环境变量）
-    const CONFIG = {
-      TOKEN: context.env.VALID_TOKEN || "147369", // 接口验证token
-      AES_KEY: context.env.AES_KEY || "xeNtBVqzDc6tuNTh", // AES加密密钥
-      AES_IV: context.env.AES_IV || "MAAAYAAAAAAAAABg", // AES加密向量
-      DEVICE_ID: "your_device_id_here", // 替换为实际设备ID
-      LAST_DEVICE_ID: "your_last_deviceid_here" // 替换为实际设备ID
-    };
-
-    // 5. AES加密（适配原PHP逻辑）
-    function aesEncrypt(text, key = CONFIG.AES_KEY, iv = CONFIG.AES_IV) {
-      const encoder = new TextEncoder();
-      const data = encoder.encode(text.padEnd(Math.ceil(text.length / 16) * 16, "\0")); // PKCS7补位
-      const cryptoKey = crypto.subtle.importKey(
+/**
+ * AES-CBC加密（适配小米密码加密规则）
+ * @param {string} text 要加密的文本
+ * @param {string} key 加密密钥
+ * @param {string} iv 加密向量
+ * @returns {string} 加密后的Base64字符串
+ */
+async function aesCbcEncrypt(text, key, iv) {
+    const encoder = new TextEncoder();
+    // PKCS7补位（小米要求）
+    const paddingLength = 16 - (text.length % 16);
+    const paddedText = text + String.fromCharCode(paddingLength).repeat(paddingLength);
+    
+    // 导入密钥
+    const cryptoKey = await crypto.subtle.importKey(
         "raw",
         encoder.encode(key),
         { name: "AES-CBC" },
         false,
         ["encrypt"]
-      );
-      return crypto.subtle.encrypt(
+    );
+
+    // 加密并转Base64
+    const encrypted = await crypto.subtle.encrypt(
         { name: "AES-CBC", iv: encoder.encode(iv) },
         cryptoKey,
-        data
-      ).then(encrypted => btoa(String.fromCharCode(...new Uint8Array(encrypted))));
-    }
+        encoder.encode(paddedText)
+    );
 
-    // 6. 登录获取token（核心逻辑）
-    log.push("开始登录获取token");
-    const encryptedPwd = await aesEncrypt(pwd);
-    const loginRes = await fetch("https://api-user.huami.com/registrations/+86" + user + "/tokens", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        client_id: "HuaMi",
-        password: encryptedPwd,
-        country_code: "CN",
-        login_token: "",
-        code: "",
-        redirect_uri: "",
-        token: "access"
-      })
-    });
-
-    if (!loginRes.ok) {
-      throw new Error(`登录失败：${loginRes.status} ${loginRes.statusText}`);
-    }
-    const loginData = await loginRes.json();
-    const accessToken = loginData.token_info?.access_token;
-    if (!accessToken) {
-      throw new Error("登录成功但未获取到access_token");
-    }
-    log.push("登录成功，获取到access_token");
-
-    // 7. 提交步数
-    log.push(`开始提交步数：${stepNum}`);
-    const submitRes = await fetch("https://api-mifit-cn.huami.com/v1/data/band_data.json", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-xiaomi-protocal-flag-cli": "PROTOCAL-HTTP2",
-        "authorization": `Bearer ${accessToken}`
-      },
-      body: JSON.stringify({
-        "userid": user,
-        "last_deviceid": CONFIG.LAST_DEVICE_ID,
-        "device_id": CONFIG.DEVICE_ID,
-        "data_json": `[{"sport_type":0,"start_time":${Date.now() - 86400000},"end_time":${Date.now()},"data":[{"time":${Date.now() - 3600000},"value":${stepNum}}]}]`,
-        "upload_time": Date.now(),
-        "device_type": "android_phone",
-        "band_type": "smartband",
-        "app_version": "6.6.0",
-        "os_version": "13",
-        "device_model": "MIUI",
-        "sync_type": "realtime"
-      })
-    });
-
-    if (!submitRes.ok) {
-      throw new Error(`提交步数失败：${submitRes.status} ${submitRes.statusText}`);
-    }
-    const submitData = await submitRes.json();
-    log.push(`步数提交响应：${JSON.stringify(submitData)}`);
-
-    // 8. 成功响应
-    return new Response(JSON.stringify({
-      status: "success",
-      message: `步数修改成功！已提交 ${stepNum} 步`,
-      log: log.join("\n"),
-      time: new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' }),
-      user: user,
-      step: stepNum
-    }), { headers });
-
-  } catch (err) {
-    // 9. 全局异常捕获（关键：确保始终返回JSON）
-    log.push(`异常：${err.message}`);
-    console.error("接口异常：", err); // Cloudflare日志
-
-    return new Response(JSON.stringify({
-      status: "failed",
-      message: err.message || "服务器内部错误",
-      log: log.join("\n"),
-      time: new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' }),
-      user: formData.get("account") || "",
-      step: formData.get("step") || ""
-    }), {
-      status: 500,
-      headers: {
-        "Content-Type": "application/json; charset=utf-8",
-        "Access-Control-Allow-Origin": "*"
-      }
-    });
-  }
+    return btoa(String.fromCharCode(...new Uint8Array(encrypted)));
 }
