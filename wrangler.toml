@@ -1,0 +1,20 @@
+# 项目名称（和你在Cloudflare Pages创建的项目名一致）
+name = "step"
+
+# 兼容的Cloudflare运行时版本
+compatibility_date = "2024-03-25"
+
+# 运行时类型（Pages Functions用service-worker）
+compatibility_flags = ["nodejs_compat"]
+type = "javascript"
+
+# 可选：如果后续要配置KV缓存，取消下面注释并替换为你的KV命名空间ID
+# [[kv_namespaces]]
+# binding = "STEP_CACHE"  # 代码中调用的KV名称
+# id = "你的KV命名空间ID"  # Cloudflare后台复制的KV ID
+
+# 可选：环境变量配置（生产环境建议把敏感信息放这里）
+[vars]
+VALID_TOKEN = "147369"       # 接口验证token
+AES_KEY = "xeNtBVqzDc6tuNTh" # 加密密钥
+AES_IV = "MAAAYAAAAAAAAABg"  # 加密向量
